@@ -51,9 +51,7 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 
 	var result []libdns.Record
 	for _, r := range recs {
-		for _, libdnsRec := range toLibdnsRecords(r, zone) {
-			result = append(result, libdnsRec)
-		}
+		result = append(result, toLibdnsRecords(r)...)
 	}
 	return result, nil
 }
@@ -61,6 +59,11 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 // AppendRecords adds records to the zone. For multi-value types (TXT, CAA,
 // TLSA) it reads existing values first and merges the new ones to avoid
 // overwriting. For single-value types it behaves like SetRecords.
+//
+// When merging into an existing multi-value record, the TTL of the existing
+// record is preserved (the caller-supplied TTL is ignored). This is intentional:
+// the Servercow API stores one TTL per (name, type) pair, and changing it while
+// appending a value would be a surprising side effect.
 func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
 	c := newClient(p.Username, p.Password)
 	bareZone := strings.TrimSuffix(zone, ".")
@@ -82,10 +85,10 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns
 		}
 
 		if multiValueTypes[rr.Type] {
-			// merge: keep existing values and add new one
+			// merge: keep existing values and add new one; preserve existing TTL
 			existingRec := findRecord(existing, name, rr.Type)
 			if existingRec != nil {
-				toPost.Content = append(value(nil), existingRec.Content...)
+				toPost.Content = append(make(value, 0, len(existingRec.Content)), existingRec.Content...)
 				toPost.TTL = existingRec.TTL
 			}
 			if !containsValue(toPost.Content, rr.Data) {
@@ -146,12 +149,19 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 }
 
 // DeleteRecords removes records from the zone.
-// For multi-value types (TXT, CAA, TLSA) it reads existing values and removes
+// For multi-value types (TXT, CAA, TLSA) it reads existing values once and removes
 // only the matching ones; if all values are removed it issues a full DELETE.
 // For single-value types it issues a DELETE directly.
 func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
 	c := newClient(p.Username, p.Password)
 	bareZone := strings.TrimSuffix(zone, ".")
+
+	// Pre-fetch all records once for multi-value read-modify-write operations,
+	// consistent with AppendRecords. Avoids N GET requests for N multi-value deletes.
+	existingRecords, err := c.getRecords(ctx, bareZone)
+	if err != nil {
+		return nil, fmt.Errorf("servercow: DeleteRecords get existing %s: %w", zone, err)
+	}
 
 	var deleted []libdns.Record
 	for _, rec := range recs {
@@ -160,10 +170,6 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns
 
 		if multiValueTypes[rr.Type] {
 			// Read-modify-write: remove only the matching value.
-			existingRecords, err := c.getRecords(ctx, bareZone)
-			if err != nil {
-				return nil, fmt.Errorf("servercow: DeleteRecords get existing %s: %w", zone, err)
-			}
 			existingRec := findRecord(existingRecords, name, rr.Type)
 			if existingRec == nil {
 				// nothing to delete
@@ -188,6 +194,8 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns
 				if err := c.createUpdateRecord(ctx, bareZone, toPost); err != nil {
 					return nil, fmt.Errorf("servercow: DeleteRecords update %s %s: %w", rr.Type, name, err)
 				}
+				// Update the in-memory view so subsequent deletes in this batch see the right state.
+				existingRec.Content = remaining
 			}
 		} else {
 			if err := c.deleteRecord(ctx, bareZone, record{Name: name, Type: rr.Type}); err != nil {
@@ -225,7 +233,8 @@ func toLibdnsName(name string) string {
 
 // toLibdnsRecords converts a Servercow record to one or more libdns.Record values.
 // Multi-value types (TXT, CAA, TLSA) produce one libdns.Record per content value.
-func toLibdnsRecords(r record, zone string) []libdns.Record {
+// Servercow record names are already zone-relative, so no zone stripping is needed.
+func toLibdnsRecords(r record) []libdns.Record {
 	name := toLibdnsName(r.Name)
 	ttl := time.Duration(r.TTL) * time.Second
 
