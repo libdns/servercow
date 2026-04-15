@@ -8,12 +8,14 @@ The Servercow DNS API uses username/password authentication passed in request he
 
 ## Usage
 
+```go
 import "github.com/libdns/servercow"
 
 provider := servercow.Provider{
     Username: "your-username",
     Password: "your-password",
 }
+```
 
 ## Supported record types
 
