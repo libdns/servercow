@@ -64,6 +64,16 @@ func TestValueUnmarshalArray(t *testing.T) {
 	}
 }
 
+func TestValueUnmarshalNull(t *testing.T) {
+	var v value
+	if err := json.Unmarshal([]byte("null"), &v); err != nil {
+		t.Fatalf("UnmarshalJSON(null) returned error: %v", err)
+	}
+	if v != nil {
+		t.Errorf("expected nil after unmarshaling null, got %v", v)
+	}
+}
+
 func TestRecordRoundtrip(t *testing.T) {
 	original := record{
 		Name:    "_acme-challenge",

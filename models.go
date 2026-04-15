@@ -17,6 +17,10 @@ type value []string
 
 func (v value) MarshalJSON() ([]byte, error) {
 	if len(v) == 0 {
+		// Return nil, nil (not []byte("null")) so that the encoding/json package
+		// treats this as an absent value when combined with the omitempty struct tag.
+		// This is intentional: record.Content uses omitempty and should be absent
+		// from JSON output when there are no values.
 		return nil, nil
 	}
 	if len(v) == 1 {
@@ -26,6 +30,11 @@ func (v value) MarshalJSON() ([]byte, error) {
 }
 
 func (v *value) UnmarshalJSON(b []byte) error {
+	// Handle JSON null explicitly.
+	if string(b) == "null" {
+		*v = nil
+		return nil
+	}
 	if len(b) > 0 && b[0] == '[' {
 		return json.Unmarshal(b, (*[]string)(v))
 	}
