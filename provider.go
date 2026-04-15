@@ -280,3 +280,11 @@ func removeValue(v value, s string) value {
 	}
 	return result
 }
+
+// Interface guards — compile-time checks that Provider implements the libdns interfaces.
+var (
+	_ libdns.RecordGetter   = (*Provider)(nil)
+	_ libdns.RecordAppender = (*Provider)(nil)
+	_ libdns.RecordSetter   = (*Provider)(nil)
+	_ libdns.RecordDeleter  = (*Provider)(nil)
+)
