@@ -1,6 +1,7 @@
 package servercow
 
 import (
+	"context"
 	"os"
 	"testing"
 )
@@ -86,7 +87,7 @@ func TestIntegration_GetRecords(t *testing.T) {
 	}
 
 	p := &Provider{Username: username, Password: password}
-	recs, err := p.GetRecords(t.Context(), zone)
+	recs, err := p.GetRecords(context.Background(), zone)
 	if err != nil {
 		t.Fatalf("GetRecords: %v", err)
 	}
