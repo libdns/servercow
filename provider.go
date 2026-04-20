@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/libdns/libdns"
@@ -28,6 +29,17 @@ type Provider struct {
 	Username string `json:"username"`
 	// Password is the Servercow DNS API password.
 	Password string `json:"password"`
+
+	once   sync.Once
+	cached *client
+}
+
+// getClient returns the shared API client, initialising it once.
+func (p *Provider) getClient() *client {
+	p.once.Do(func() {
+		p.cached = newClient(p.Username, p.Password)
+	})
+	return p.cached
 }
 
 // multiValueTypes lists the Servercow record types that accept multiple content
@@ -41,7 +53,7 @@ var multiValueTypes = map[string]bool{
 // GetRecords returns all DNS records for the given zone.
 // zone must be a fully-qualified domain name with a trailing dot (e.g. "example.com.").
 func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record, error) {
-	c := newClient(p.Username, p.Password)
+	c := p.getClient()
 	bareZone := strings.TrimSuffix(zone, ".")
 
 	recs, err := c.getRecords(ctx, bareZone)
@@ -65,7 +77,7 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 // the Servercow API stores one TTL per (name, type) pair, and changing it while
 // appending a value would be a surprising side effect.
 func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
-	c := newClient(p.Username, p.Password)
+	c := p.getClient()
 	bareZone := strings.TrimSuffix(zone, ".")
 
 	existing, err := c.getRecords(ctx, bareZone)
@@ -109,7 +121,7 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns
 // SetRecords sets records in the zone, creating or replacing as needed.
 // For a given (name, type) pair, any previous content is fully replaced.
 func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
-	c := newClient(p.Username, p.Password)
+	c := p.getClient()
 	bareZone := strings.TrimSuffix(zone, ".")
 
 	// Group by (name, type) so multi-value types are posted as a single record.
@@ -153,7 +165,7 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 // only the matching ones; if all values are removed it issues a full DELETE.
 // For single-value types it issues a DELETE directly.
 func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
-	c := newClient(p.Username, p.Password)
+	c := p.getClient()
 	bareZone := strings.TrimSuffix(zone, ".")
 
 	// Pre-fetch all records once for multi-value read-modify-write operations,
