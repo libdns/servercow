@@ -1,5 +1,7 @@
 # libdns/servercow
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/libdns/servercow.svg)](https://pkg.go.dev/github.com/libdns/servercow)
+
 This package implements the [libdns](https://github.com/libdns/libdns) interfaces for [Servercow](https://servercow.de), allowing DNS records to be managed via the Servercow DNS API.
 
 ## Authentication
