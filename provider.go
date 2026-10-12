@@ -6,9 +6,9 @@
 // Authentication uses a username and password created in the Servercow customer
 // portal under "DNS API".
 //
-// Note on AppendRecords: For multi-value record types (TXT, CAA, TLSA), this
-// method performs a read-modify-write to preserve existing values. For
-// single-value types (A, AAAA, CNAME, MX), it behaves identically to
+// Note on AppendRecords: For multi-value record types (TXT, CAA, TLSA, SVCB,
+// HTTPS), this method performs a read-modify-write to preserve existing
+// values. For single-value types (A, AAAA, CNAME, MX), it behaves identically to
 // SetRecords because the Servercow API stores only one value set per
 // (name, type) pair and does not distinguish between create and update.
 package servercow
@@ -45,9 +45,11 @@ func (p *Provider) getClient() *client {
 // multiValueTypes lists the Servercow record types that accept multiple content
 // values under a single (name, type) key. All other types are single-value.
 var multiValueTypes = map[string]bool{
-	"TXT":  true,
-	"CAA":  true,
-	"TLSA": true,
+	"TXT":   true,
+	"CAA":   true,
+	"TLSA":  true,
+	"SVCB":  true,
+	"HTTPS": true,
 }
 
 // GetRecords returns all DNS records for the given zone.
@@ -69,8 +71,8 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 }
 
 // AppendRecords adds records to the zone. For multi-value types (TXT, CAA,
-// TLSA) it reads existing values first and merges the new ones to avoid
-// overwriting. For single-value types it behaves like SetRecords.
+// TLSA, SVCB, HTTPS) it reads existing values first and merges the new ones
+// to avoid overwriting. For single-value types it behaves like SetRecords.
 //
 // When merging into an existing multi-value record, the TTL of the existing
 // record is preserved (the caller-supplied TTL is ignored). This is intentional:
@@ -244,7 +246,7 @@ func toLibdnsName(name string) string {
 }
 
 // toLibdnsRecords converts a Servercow record to one or more libdns.Record values.
-// Multi-value types (TXT, CAA, TLSA) produce one libdns.Record per content value.
+// Multi-value types (TXT, CAA, TLSA, SVCB, HTTPS) produce one libdns.Record per content value.
 // Servercow record names are already zone-relative, so no zone stripping is needed.
 func toLibdnsRecords(r record) []libdns.Record {
 	name := toLibdnsName(r.Name)

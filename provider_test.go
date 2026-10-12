@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 )
 
 // --- Name mapping unit tests ---
@@ -73,6 +74,46 @@ func TestRemoveValue_NotPresent(t *testing.T) {
 	result := removeValue(v, "z")
 	if len(result) != 2 {
 		t.Errorf("removeValue (not present) changed slice: %v", result)
+	}
+}
+
+func TestMultiValueTypes_ContainsHTTPSAndSVCB(t *testing.T) {
+	for _, typ := range []string{"HTTPS", "SVCB"} {
+		if !multiValueTypes[typ] {
+			t.Errorf("multiValueTypes[%q] = false, want true", typ)
+		}
+	}
+	// existing multi-value types must remain
+	for _, typ := range []string{"TXT", "CAA", "TLSA"} {
+		if !multiValueTypes[typ] {
+			t.Errorf("multiValueTypes[%q] = false, want true", typ)
+		}
+	}
+	// single-value types must remain absent
+	for _, typ := range []string{"A", "AAAA", "CNAME", "MX"} {
+		if multiValueTypes[typ] {
+			t.Errorf("multiValueTypes[%q] = true, want false", typ)
+		}
+	}
+}
+
+func TestToLibdnsRecords_HTTPSMultiValue(t *testing.T) {
+	r := record{
+		Name:    "_https-probe",
+		Type:    "HTTPS",
+		TTL:     300,
+		Content: value{"1 .", "2 . alpn=h3"},
+	}
+	recs := toLibdnsRecords(r)
+	if len(recs) != 2 {
+		t.Fatalf("got %d records, want 2", len(recs))
+	}
+	wantData := []string{"1 .", "2 . alpn=h3"}
+	for i, rec := range recs {
+		rr := rec.RR()
+		if rr.Name != "_https-probe" || rr.Type != "HTTPS" || rr.TTL != 300*time.Second || rr.Data != wantData[i] {
+			t.Errorf("record %d = %+v, want name=_https-probe type=HTTPS ttl=300s data=%q", i, rr, wantData[i])
+		}
 	}
 }
 
