@@ -21,9 +21,9 @@ provider := servercow.Provider{
 
 ## Supported record types
 
-TXT, A, AAAA, CNAME, MX, CAA, TLSA
+TXT, A, AAAA, CNAME, MX, CAA, TLSA, SVCB, HTTPS
 
 ## Notes
 
-- `AppendRecords` for multi-value types (TXT, CAA, TLSA) performs a read-modify-write to preserve existing values. For single-value types (A, AAAA, CNAME, MX), it behaves like `SetRecords` because the Servercow API stores only one value set per (name, type) pair.
+- `AppendRecords` for multi-value types (TXT, CAA, TLSA, SVCB, HTTPS) performs a read-modify-write to preserve existing values. For single-value types (A, AAAA, CNAME, MX), it behaves like `SetRecords` because the Servercow API stores only one value set per (name, type) pair.
 - Zone listing is not supported (no API endpoint).
