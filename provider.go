@@ -163,7 +163,7 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 }
 
 // DeleteRecords removes records from the zone.
-// For multi-value types (TXT, CAA, TLSA) it reads existing values once and removes
+// For multi-value types (TXT, CAA, TLSA, SVCB, HTTPS) it reads existing values once and removes
 // only the matching ones; if all values are removed it issues a full DELETE.
 // For single-value types it issues a DELETE directly.
 func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
