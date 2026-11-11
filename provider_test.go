@@ -160,6 +160,77 @@ func TestSetRecords_RejectsMultipleValuesForSingleValueType(t *testing.T) {
 	}
 }
 
+func TestAppendRecords_RejectsMultipleValuesForSingleValueType(t *testing.T) {
+	p := &Provider{Username: "dummy", Password: "dummy"}
+	recs := []libdns.Record{
+		libdns.RR{Name: "host", Type: "SSHFP", TTL: 120 * time.Second, Data: "value-1"},
+		libdns.RR{Name: "host", Type: "SSHFP", TTL: 120 * time.Second, Data: "value-2"},
+	}
+	// As with SetRecords, the check runs before the initial GET.
+	_, err := p.AppendRecords(context.Background(), "example.com.", recs)
+	if err == nil || !strings.Contains(err.Error(), "AppendRecords SSHFP host: type supports only one value") {
+		t.Fatalf("expected AppendRecords duplicate error, got %v", err)
+	}
+}
+
+func TestCheckSingleValueDuplicates(t *testing.T) {
+	rr := func(name, typ, data string) libdns.Record {
+		return libdns.RR{Name: name, Type: typ, Data: data}
+	}
+	tests := []struct {
+		name    string
+		recs    []libdns.Record
+		wantErr bool
+	}{
+		{"multi-value type", []libdns.Record{rr("host", "TXT", "a"), rr("host", "TXT", "b")}, false},
+		{"multi-value type lower-case", []libdns.Record{rr("host", "txt", "a"), rr("HOST", "txt", "b")}, false},
+		{"single-value duplicate", []libdns.Record{rr("host", "SSHFP", "a"), rr("host", "SSHFP", "b")}, true},
+		{"single-value duplicate mixed case", []libdns.Record{rr("host", "sshfp", "a"), rr("HOST", "SSHFP", "b")}, true},
+		{"single-value different names", []libdns.Record{rr("host", "SSHFP", "a"), rr("other", "SSHFP", "b")}, false},
+		{"single-value different types", []libdns.Record{rr("host", "SSHFP", "a"), rr("host", "SMIMEA", "b")}, false},
+		{"apex spellings", []libdns.Record{rr("@", "MX", "a"), rr("", "MX", "b")}, true},
+		{"absolute apex and @", []libdns.Record{rr("example.com.", "MX", "a"), rr("@", "MX", "b")}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkSingleValueDuplicates("SetRecords", "example.com.", tc.recs)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestToServercowName_AbsoluteFQDN(t *testing.T) {
+	tests := []struct {
+		name, zone, want string
+	}{
+		{"host.example.com.", "example.com.", "host"},
+		{"host.sub.example.com.", "example.com.", "host.sub"},
+		{"example.com.", "example.com.", ""},
+		{"example.com.", "example.com", ""},
+		{"host", "example.com.", "host"},
+	}
+	for _, tc := range tests {
+		if got := toServercowName(tc.name, tc.zone); got != tc.want {
+			t.Errorf("toServercowName(%q, %q) = %q, want %q", tc.name, tc.zone, got, tc.want)
+		}
+	}
+}
+
+func TestFindRecord_CaseInsensitive(t *testing.T) {
+	recs := []record{{Name: "Host", Type: "TXT", Content: value{"a"}}}
+	if findRecord(recs, "host", "txt") == nil {
+		t.Error("expected case-insensitive match")
+	}
+	if findRecord(recs, "other", "TXT") != nil {
+		t.Error("unexpected match for different name")
+	}
+}
+
 // --- Integration tests (require live credentials) ---
 
 func TestIntegration_GetRecords(t *testing.T) {

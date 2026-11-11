@@ -11,8 +11,9 @@
 //
 // The API stores multiple content values under one (name, type) key only for
 // TXT, CAA, TLSA, HTTPS and SVCB. For all other types, including SRV, SSHFP and
-// SMIMEA, only a single value is stored per (name, type) pair; SetRecords
-// returns an error if more than one value is supplied for such a pair.
+// SMIMEA, only a single value is stored per (name, type) pair; SetRecords and
+// AppendRecords return an error if more than one value is supplied for such a
+// pair.
 //
 // Note on AppendRecords: For multi-value record types (TXT, CAA, TLSA, HTTPS,
 // SVCB), this method performs a read-modify-write to preserve existing values.
@@ -86,7 +87,7 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 }
 
 // AppendRecords adds records to the zone. For multi-value types (TXT, CAA,
-// TLSA, SVCB, HTTPS) it reads existing values first and merges the new ones
+// TLSA, HTTPS, SVCB) it reads existing values first and merges the new ones
 // to avoid overwriting. For single-value types it behaves like SetRecords.
 //
 // When merging into an existing multi-value record, the TTL of the existing
@@ -94,6 +95,12 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 // the Servercow API stores one TTL per (name, type) pair, and changing it while
 // appending a value would be a surprising side effect.
 func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
+	// Reject multiple values for a single-value type before issuing any request:
+	// the API would otherwise overwrite all but the last value.
+	if err := checkSingleValueDuplicates("AppendRecords", zone, recs); err != nil {
+		return nil, err
+	}
+
 	c := p.getClient()
 	bareZone := strings.TrimSuffix(zone, ".")
 
@@ -106,16 +113,17 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns
 	for _, rec := range recs {
 		rr := rec.RR()
 		name := toServercowName(rr.Name, zone)
+		typ := strings.ToUpper(rr.Type)
 
 		toPost := record{
 			Name: name,
-			Type: rr.Type,
+			Type: typ,
 			TTL:  int(rr.TTL.Seconds()),
 		}
 
-		if multiValueTypes[rr.Type] {
+		if multiValueTypes[typ] {
 			// merge: keep existing values and add new one; preserve existing TTL
-			existingRec := findRecord(existing, name, rr.Type)
+			existingRec := findRecord(existing, name, typ)
 			if existingRec != nil {
 				toPost.Content = append(make(value, 0, len(existingRec.Content)), existingRec.Content...)
 				toPost.TTL = existingRec.TTL
@@ -143,36 +151,36 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns
 // value, so SetRecords returns an error if multiple values are supplied for one
 // pair instead of letting the API fail with an opaque HTTP 500 response.
 func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
-	c := p.getClient()
-	bareZone := strings.TrimSuffix(zone, ".")
-
-	// Group by (name, type) so multi-value types are posted as a single record.
-	type key struct{ name, typ string }
-	grouped := make(map[key][]libdns.Record)
-	var order []key
-	for _, rec := range recs {
-		rr := rec.RR()
-		k := key{toServercowName(rr.Name, zone), rr.Type}
-		if _, exists := grouped[k]; !exists {
-			order = append(order, k)
-		}
-		grouped[k] = append(grouped[k], rec)
-	}
-
 	// Reject multiple values for a single-value type before issuing any request:
 	// the Servercow API stores only one content value per (name, type) pair for
 	// these types and answers with HTTP 500 when it receives an array.
-	for _, k := range order {
-		if group := grouped[k]; !multiValueTypes[k.typ] && len(group) > 1 {
-			return nil, fmt.Errorf("servercow: SetRecords %s %s: type supports only one value per name and type (got %d)", k.typ, toLibdnsName(k.name), len(group))
+	if err := checkSingleValueDuplicates("SetRecords", zone, recs); err != nil {
+		return nil, err
+	}
+
+	c := p.getClient()
+	bareZone := strings.TrimSuffix(zone, ".")
+
+	// Group by canonical (name, type) so multi-value types are posted as a
+	// single record. The first spelling of the name is used on the wire.
+	grouped := make(map[recordKey][]libdns.Record)
+	postName := make(map[recordKey]string)
+	var order []recordKey
+	for _, rec := range recs {
+		rr := rec.RR()
+		k := recordKeyFor(zone, rr)
+		if _, exists := grouped[k]; !exists {
+			order = append(order, k)
+			postName[k] = toServercowName(rr.Name, zone)
 		}
+		grouped[k] = append(grouped[k], rec)
 	}
 
 	var set []libdns.Record
 	for _, k := range order {
 		group := grouped[k]
 		toPost := record{
-			Name: k.name,
+			Name: postName[k],
 			Type: k.typ,
 		}
 		for i, rec := range group {
@@ -184,7 +192,7 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 		}
 
 		if err := c.createUpdateRecord(ctx, bareZone, toPost); err != nil {
-			return nil, fmt.Errorf("servercow: SetRecords %s %s: %w", k.typ, k.name, err)
+			return nil, fmt.Errorf("servercow: SetRecords %s %s: %w", k.typ, toLibdnsName(postName[k]), err)
 		}
 		set = append(set, group...)
 	}
@@ -210,10 +218,11 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns
 	for _, rec := range recs {
 		rr := rec.RR()
 		name := toServercowName(rr.Name, zone)
+		typ := strings.ToUpper(rr.Type)
 
-		if multiValueTypes[rr.Type] {
+		if multiValueTypes[typ] {
 			// Read-modify-write: remove only the matching value.
-			existingRec := findRecord(existingRecords, name, rr.Type)
+			existingRec := findRecord(existingRecords, name, typ)
 			if existingRec == nil {
 				// nothing to delete
 				continue
@@ -223,7 +232,7 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns
 
 			if len(remaining) == 0 {
 				// delete the whole record
-				if err := c.deleteRecord(ctx, bareZone, record{Name: name, Type: rr.Type}); err != nil {
+				if err := c.deleteRecord(ctx, bareZone, record{Name: name, Type: typ}); err != nil {
 					return nil, fmt.Errorf("servercow: DeleteRecords %s %s: %w", rr.Type, name, err)
 				}
 			} else {
@@ -241,13 +250,50 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, recs []libdns
 				existingRec.Content = remaining
 			}
 		} else {
-			if err := c.deleteRecord(ctx, bareZone, record{Name: name, Type: rr.Type}); err != nil {
+			if err := c.deleteRecord(ctx, bareZone, record{Name: name, Type: typ}); err != nil {
 				return nil, fmt.Errorf("servercow: DeleteRecords %s %s: %w", rr.Type, name, err)
 			}
 		}
 		deleted = append(deleted, rec)
 	}
 	return deleted, nil
+}
+
+// recordKey identifies a record set by its canonical Servercow name and type.
+// DNS names are case-insensitive and the API uses upper-case type names, so
+// grouping and validation normalise both.
+type recordKey struct {
+	name string // lower-case, zone-relative; "" is the apex
+	typ  string // upper-case
+}
+
+// recordKeyFor returns the canonical key for a libdns record.
+func recordKeyFor(zone string, rr libdns.RR) recordKey {
+	return recordKey{
+		name: strings.ToLower(toServercowName(rr.Name, zone)),
+		typ:  strings.ToUpper(rr.Type),
+	}
+}
+
+// checkSingleValueDuplicates returns an error if recs contains more than one
+// value for the same canonical (name, type) pair of a single-value type.
+// It runs before any HTTP request so callers fail fast and atomically.
+func checkSingleValueDuplicates(method, zone string, recs []libdns.Record) error {
+	counts := make(map[recordKey]int)
+	var order []recordKey
+	for _, rec := range recs {
+		k := recordKeyFor(zone, rec.RR())
+		if counts[k] == 0 {
+			order = append(order, k)
+		}
+		counts[k]++
+	}
+	for _, k := range order {
+		if !multiValueTypes[k.typ] && counts[k] > 1 {
+			return fmt.Errorf("servercow: %s %s %s: type supports only one value per name and type (got %d)", method, k.typ, toLibdnsName(k.name), counts[k])
+		}
+	}
+	return nil
 }
 
 // toServercowName converts a libdns record name to the Servercow API name format.
@@ -257,11 +303,14 @@ func toServercowName(name, zone string) string {
 	if name == "@" || name == "" {
 		return ""
 	}
-	// Strip trailing dot from zone for comparison purposes.
 	bareZone := strings.TrimSuffix(zone, ".")
-	// If name is somehow an absolute FQDN, make it relative.
-	name = strings.TrimSuffix(name, "."+bareZone)
+	// Names may arrive as absolute FQDNs (defensive): strip the trailing dot
+	// and the zone suffix if present.
 	name = strings.TrimSuffix(name, ".")
+	if name == bareZone {
+		return ""
+	}
+	name = strings.TrimSuffix(name, "."+bareZone)
 	return name
 }
 
@@ -294,9 +343,10 @@ func toLibdnsRecords(r record) []libdns.Record {
 }
 
 // findRecord searches a slice of records for one matching name and type.
+// Comparisons are case-insensitive because DNS names and type names are.
 func findRecord(records []record, name, typ string) *record {
 	for i := range records {
-		if records[i].Name == name && records[i].Type == typ {
+		if strings.EqualFold(records[i].Name, name) && strings.EqualFold(records[i].Type, typ) {
 			return &records[i]
 		}
 	}

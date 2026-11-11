@@ -12,7 +12,8 @@ type record struct {
 
 // value represents a DNS record's content. The Servercow API accepts either a
 // plain JSON string (for single-value records) or a JSON array (for multi-value
-// record types such as TXT, CAA, TLSA). This type handles both forms.
+// record types such as TXT, CAA, TLSA, HTTPS and SVCB). This type handles both
+// forms.
 type value []string
 
 func (v value) MarshalJSON() ([]byte, error) {
