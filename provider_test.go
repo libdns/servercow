@@ -2,8 +2,13 @@ package servercow
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -228,6 +233,153 @@ func TestFindRecord_CaseInsensitive(t *testing.T) {
 	}
 	if findRecord(recs, "other", "TXT") != nil {
 		t.Error("unexpected match for different name")
+	}
+}
+
+// --- Fake API tests ---
+
+// fakeServer implements the subset of the Servercow API used by the provider,
+// storing one record per (name, type) pair like the real API does.
+type fakeServer struct {
+	mu      sync.Mutex
+	records []record
+}
+
+func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch r.Method {
+	case http.MethodGet:
+		_ = json.NewEncoder(w).Encode(f.records)
+	case http.MethodPost:
+		var rec record
+		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		replaced := false
+		for i := range f.records {
+			if strings.EqualFold(f.records[i].Name, rec.Name) && strings.EqualFold(f.records[i].Type, rec.Type) {
+				f.records[i] = rec
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			f.records = append(f.records, rec)
+		}
+		_, _ = w.Write([]byte(`{"message":"ok"}`))
+	case http.MethodDelete:
+		var rec record
+		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		kept := f.records[:0]
+		for _, existing := range f.records {
+			if strings.EqualFold(existing.Name, rec.Name) && strings.EqualFold(existing.Type, rec.Type) {
+				continue
+			}
+			kept = append(kept, existing)
+		}
+		f.records = kept
+		_, _ = w.Write([]byte(`{"message":"ok"}`))
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (f *fakeServer) snapshot() []record {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]record(nil), f.records...)
+}
+
+func newFakeProvider(t *testing.T, records ...record) (*Provider, *fakeServer) {
+	t.Helper()
+	f := &fakeServer{records: records}
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Provider{baseURL: u}, f
+}
+
+func TestAppendRecords_MergesValuesWithinBatch(t *testing.T) {
+	p, f := newFakeProvider(t, record{
+		Name: "host", Type: "TXT", TTL: 120, Content: value{"old"},
+	})
+	recs := []libdns.Record{
+		libdns.RR{Name: "host", Type: "TXT", TTL: 300 * time.Second, Data: "a"},
+		libdns.RR{Name: "host", Type: "TXT", TTL: 300 * time.Second, Data: "b"},
+	}
+	if _, err := p.AppendRecords(context.Background(), "example.com.", recs); err != nil {
+		t.Fatalf("AppendRecords: %v", err)
+	}
+	got := f.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("got %d records, want 1: %+v", len(got), got)
+	}
+	if want := []string{"old", "a", "b"}; strings.Join(got[0].Content, ",") != strings.Join(want, ",") {
+		t.Errorf("content = %v, want %v", got[0].Content, want)
+	}
+	if got[0].TTL != 120 {
+		t.Errorf("TTL = %d, want existing TTL 120", got[0].TTL)
+	}
+}
+
+func TestSetRecords_LowercaseMultiValueGrouped(t *testing.T) {
+	p, f := newFakeProvider(t)
+	recs := []libdns.Record{
+		libdns.RR{Name: "host", Type: "txt", TTL: 120 * time.Second, Data: "a"},
+		libdns.RR{Name: "host", Type: "txt", TTL: 120 * time.Second, Data: "b"},
+	}
+	if _, err := p.SetRecords(context.Background(), "example.com.", recs); err != nil {
+		t.Fatalf("SetRecords: %v", err)
+	}
+	got := f.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("got %d records, want 1: %+v", len(got), got)
+	}
+	if got[0].Type != "TXT" {
+		t.Errorf("type = %q, want TXT", got[0].Type)
+	}
+	if len(got[0].Content) != 2 {
+		t.Errorf("content = %v, want two values", got[0].Content)
+	}
+}
+
+func TestSetRecords_MixedBatch(t *testing.T) {
+	p, f := newFakeProvider(t)
+	recs := []libdns.Record{
+		libdns.RR{Name: "host", Type: "TXT", TTL: 120 * time.Second, Data: "a"},
+		libdns.RR{Name: "host", Type: "TXT", TTL: 120 * time.Second, Data: "b"},
+		libdns.RR{Name: "host", Type: "SSHFP", TTL: 120 * time.Second, Data: "2 1 abcdef"},
+	}
+	if _, err := p.SetRecords(context.Background(), "example.com.", recs); err != nil {
+		t.Fatalf("SetRecords: %v", err)
+	}
+	got := f.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("got %d records, want 2: %+v", len(got), got)
+	}
+}
+
+func TestAppendRecords_MixedBatchRejectedAtomically(t *testing.T) {
+	p, f := newFakeProvider(t)
+	recs := []libdns.Record{
+		libdns.RR{Name: "host", Type: "TXT", TTL: 120 * time.Second, Data: "a"},
+		libdns.RR{Name: "host", Type: "SSHFP", TTL: 120 * time.Second, Data: "one"},
+		libdns.RR{Name: "host", Type: "SSHFP", TTL: 120 * time.Second, Data: "two"},
+	}
+	_, err := p.AppendRecords(context.Background(), "example.com.", recs)
+	if err == nil || !strings.Contains(err.Error(), "supports only one value per name and type") {
+		t.Fatalf("expected duplicate error, got %v", err)
+	}
+	if got := f.snapshot(); len(got) != 0 {
+		t.Fatalf("no request should have been made, got records %+v", got)
 	}
 }
 

@@ -31,6 +31,7 @@ package servercow
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -47,12 +48,17 @@ type Provider struct {
 
 	once   sync.Once
 	cached *client
+	// baseURL overrides the API endpoint in tests; nil uses the production URL.
+	baseURL *url.URL
 }
 
 // getClient returns the shared API client, initialising it once.
 func (p *Provider) getClient() *client {
 	p.once.Do(func() {
 		p.cached = newClient(p.Username, p.Password)
+		if p.baseURL != nil {
+			p.cached.baseURL = p.baseURL
+		}
 	})
 	return p.cached
 }
@@ -137,6 +143,15 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns
 
 		if err := c.createUpdateRecord(ctx, bareZone, toPost); err != nil {
 			return nil, fmt.Errorf("servercow: AppendRecords %s %s: %w", rr.Type, rr.Name, err)
+		}
+		if multiValueTypes[typ] {
+			// Keep the in-memory view current so later records in this batch
+			// merge with the values appended above instead of overwriting them.
+			if existingRec := findRecord(existing, name, typ); existingRec != nil {
+				existingRec.Content = toPost.Content
+			} else {
+				existing = append(existing, toPost)
+			}
 		}
 		appended = append(appended, rec)
 	}
@@ -305,12 +320,14 @@ func toServercowName(name, zone string) string {
 	}
 	bareZone := strings.TrimSuffix(zone, ".")
 	// Names may arrive as absolute FQDNs (defensive): strip the trailing dot
-	// and the zone suffix if present.
+	// and, case-insensitively, the zone suffix if present.
 	name = strings.TrimSuffix(name, ".")
-	if name == bareZone {
+	if strings.EqualFold(name, bareZone) {
 		return ""
 	}
-	name = strings.TrimSuffix(name, "."+bareZone)
+	if suffix := "." + bareZone; len(name) > len(suffix) && strings.EqualFold(name[len(name)-len(suffix):], suffix) {
+		return name[:len(name)-len(suffix)]
+	}
 	return name
 }
 
