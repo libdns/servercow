@@ -6,11 +6,25 @@
 // Authentication uses a username and password created in the Servercow customer
 // portal under "DNS API".
 //
-// Note on AppendRecords: For multi-value record types (TXT, CAA, TLSA, SVCB,
-// HTTPS), this method performs a read-modify-write to preserve existing
-// values. For single-value types (A, AAAA, CNAME, MX), it behaves identically to
-// SetRecords because the Servercow API stores only one value set per
-// (name, type) pair and does not distinguish between create and update.
+// Supported record types are A, AAAA, CNAME, TXT, MX, CAA, TLSA, SRV, SSHFP,
+// SMIMEA, HTTPS and SVCB.
+//
+// The API stores multiple content values under one (name, type) key only for
+// TXT, CAA, TLSA, HTTPS and SVCB. For all other types, including SRV, SSHFP and
+// SMIMEA, only a single value is stored per (name, type) pair; SetRecords
+// returns an error if more than one value is supplied for such a pair.
+//
+// Note on AppendRecords: For multi-value record types (TXT, CAA, TLSA, HTTPS,
+// SVCB), this method performs a read-modify-write to preserve existing values.
+// For single-value types it behaves identically to SetRecords because the
+// Servercow API stores only one value set per (name, type) pair and does not
+// distinguish between create and update.
+//
+// Servercow's current API restricts the owner names and content it accepts for
+// some types: owner names containing "_" are rejected for SRV, SSHFP, SMIMEA
+// and CAA, and SRV content is only accepted with the target "." (a real target
+// name is rejected). Conventional SRV records such as _sip._tcp therefore
+// cannot currently be created through the API.
 package servercow
 
 import (
@@ -43,7 +57,8 @@ func (p *Provider) getClient() *client {
 }
 
 // multiValueTypes lists the Servercow record types that accept multiple content
-// values under a single (name, type) key. All other types are single-value.
+// values under a single (name, type) key. All other supported types (A, AAAA,
+// CNAME, MX, SRV, SSHFP, SMIMEA) are single-value.
 var multiValueTypes = map[string]bool{
 	"TXT":   true,
 	"CAA":   true,
@@ -122,6 +137,11 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, recs []libdns
 
 // SetRecords sets records in the zone, creating or replacing as needed.
 // For a given (name, type) pair, any previous content is fully replaced.
+//
+// Only multi-value types may carry more than one value for the same (name,
+// type) pair. For single-value types the Servercow API stores a single content
+// value, so SetRecords returns an error if multiple values are supplied for one
+// pair instead of letting the API fail with an opaque HTTP 500 response.
 func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Record) ([]libdns.Record, error) {
 	c := p.getClient()
 	bareZone := strings.TrimSuffix(zone, ".")
@@ -137,6 +157,15 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, recs []libdns.Re
 			order = append(order, k)
 		}
 		grouped[k] = append(grouped[k], rec)
+	}
+
+	// Reject multiple values for a single-value type before issuing any request:
+	// the Servercow API stores only one content value per (name, type) pair for
+	// these types and answers with HTTP 500 when it receives an array.
+	for _, k := range order {
+		if group := grouped[k]; !multiValueTypes[k.typ] && len(group) > 1 {
+			return nil, fmt.Errorf("servercow: SetRecords %s %s: type supports only one value per name and type (got %d)", k.typ, toLibdnsName(k.name), len(group))
+		}
 	}
 
 	var set []libdns.Record
