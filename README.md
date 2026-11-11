@@ -6,7 +6,7 @@ This package implements the [libdns](https://github.com/libdns/libdns) interface
 
 ## Authentication
 
-The Servercow DNS API uses username/password authentication passed in request headers. See [Servercow docs](https://wiki.servercow.de/de/domains/dns_api/api-syntax/) for more info.
+The Servercow DNS API uses username/password authentication passed in request headers. See [Servercow docs](https://wiki.servercow.de/en/domains/dns_api/api-syntax/) for more info.
 
 ## Usage
 
